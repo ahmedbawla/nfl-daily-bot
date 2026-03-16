@@ -1,8 +1,9 @@
 """
 NFL Daily Telegram Bot
-- Sends a daily digest at midnight EDT automatically
-- Responds to /update in Telegram for an on-demand update
-Sources: ESPN Scoreboard · ESPN News · Reddit r/nfl social buzz
+- /update or /nfl  → general NFL digest
+- /fantasy         → fantasy football focused digest
+- Midnight ET      → auto daily digest
+Sources: ESPN Scoreboard · ESPN News · ESPN Injuries · Reddit r/nfl · Reddit r/fantasyfootball
 """
 
 import os
@@ -91,11 +92,49 @@ def get_nfl_news(limit: int = 10) -> list[str]:
         return []
 
 
-# ── Reddit r/nfl ──────────────────────────────────────────────────────────────
-def get_reddit_buzz(limit: int = 15) -> list[str]:
+# ── ESPN Injuries ─────────────────────────────────────────────────────────────
+def get_nfl_injuries() -> list[str]:
+    """Current NFL injury report — key for fantasy decisions."""
     try:
         resp = requests.get(
-            "https://www.reddit.com/r/nfl/top.json",
+            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries",
+            headers=HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        injuries = []
+        for team_block in resp.json().get("injuries", []):
+            team_name = team_block.get("team", {}).get("displayName", "")
+            for player in team_block.get("injuries", []):
+                athlete = player.get("athlete", {})
+                name    = athlete.get("displayName", "")
+                pos     = athlete.get("position", {}).get("abbreviation", "")
+                status  = player.get("status", "")
+                details = player.get("details", {})
+                inj_type = details.get("type", "")
+                side     = details.get("side", "")
+                fantasy_status = details.get("fantasyStatus", {}).get("description", "")
+
+                if not name or not status:
+                    continue
+
+                line = f"{name} ({pos}, {team_name}) — {status}"
+                if inj_type:
+                    line += f" [{inj_type}{' ' + side if side else ''}]"
+                if fantasy_status:
+                    line += f" · {fantasy_status}"
+                injuries.append(line)
+        return injuries[:25]
+    except Exception as e:
+        print(f"[WARN] ESPN injuries: {e}")
+        return []
+
+
+# ── Reddit ────────────────────────────────────────────────────────────────────
+def get_reddit_top(subreddit: str, limit: int = 15) -> list[str]:
+    try:
+        resp = requests.get(
+            f"https://www.reddit.com/r/{subreddit}/top.json",
             params={"t": "day", "limit": limit},
             headers=HEADERS,
             timeout=10,
@@ -113,70 +152,11 @@ def get_reddit_buzz(limit: int = 15) -> list[str]:
             buzz.append(f"{tag}{title}  (↑{score:,})")
         return buzz[:10]
     except Exception as e:
-        print(f"[WARN] Reddit r/nfl: {e}")
+        print(f"[WARN] Reddit r/{subreddit}: {e}")
         return []
 
 
-# ── Build context ─────────────────────────────────────────────────────────────
-def build_context(yesterday_games, upcoming_games, news, reddit_buzz, report_date) -> str:
-    lines = [f"Report date: {report_date}", ""]
-
-    lines.append("=== YESTERDAY'S NFL SCORES ===")
-    if yesterday_games:
-        for g in yesterday_games:
-            lines.append("  " + fmt_score(g))
-    else:
-        lines.append("  No games yesterday (off-season or bye week).")
-
-    lines.append("")
-    lines.append("=== UPCOMING / IN-PROGRESS GAMES ===")
-    if upcoming_games:
-        for g in upcoming_games:
-            lines.append("  " + fmt_score(g))
-    else:
-        lines.append("  No games currently scheduled in the near term.")
-
-    lines.append("")
-    lines.append("=== LATEST ESPN NFL NEWS ===")
-    for item in (news or ["No news available."]):
-        lines.append(f"  • {item}")
-
-    lines.append("")
-    lines.append("=== REDDIT r/nfl — TOP POSTS TODAY ===")
-    for item in (reddit_buzz or ["No posts found."]):
-        lines.append(f"  • {item}")
-
-    return "\n".join(lines)
-
-
-# ── Claude ────────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a sharp, knowledgeable NFL analyst writing a daily Telegram digest.
-Your job: distill a lot of information into one tight, satisfying message.
-
-RULES:
-- ONE message only. No multi-part replies.
-- Absolute max: 550 words / ~3,000 characters (Telegram limit is 4,096).
-- Use Telegram HTML only: <b>bold</b>, <i>italic</i>. No markdown, no asterisks.
-- Structure with clear emoji section headers so it's skimmable at a glance.
-- Be selective — pick the 3-4 most interesting news items and 2-3 social highlights.
-- If it's the off-season, lean hard into free agency, trades, draft, coaching moves.
-- Write like a smart friend who follows the NFL obsessively, not a press release.
-- No fluff, no filler. Every sentence should earn its place."""
-
-def generate_update(context: str, report_date: str) -> str:
-    resp = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=1100,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": (
-            f"Here is today's NFL data for {report_date}:\n\n{context}\n\n"
-            "Write the daily NFL Telegram digest now. Follow the system rules exactly."
-        )}],
-    )
-    return resp.content[0].text.strip()
-
-
-# ── Telegram ──────────────────────────────────────────────────────────────────
+# ── Telegram helpers ──────────────────────────────────────────────────────────
 def send_telegram(text: str):
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     resp = requests.post(url, json={
@@ -189,7 +169,7 @@ def send_telegram(text: str):
     if not data.get("ok"):
         print(f"[ERROR] Telegram: {data}", file=sys.stderr)
     else:
-        print("✓ Digest sent.")
+        print("✓ Message sent.")
 
 
 def send_typing():
@@ -200,7 +180,20 @@ def send_typing():
     )
 
 
-# ── Core digest job ───────────────────────────────────────────────────────────
+# ── NFL Digest ────────────────────────────────────────────────────────────────
+NFL_SYSTEM_PROMPT = """You are a sharp, knowledgeable NFL analyst writing a daily Telegram digest.
+Your job: distill a lot of information into one tight, satisfying message.
+
+RULES:
+- ONE message only. No multi-part replies.
+- Absolute max: 550 words / ~3,000 characters.
+- Use Telegram HTML only: <b>bold</b>, <i>italic</i>. No markdown, no asterisks.
+- Structure with clear emoji section headers so it's skimmable at a glance.
+- Be selective — pick the 3-4 most interesting news items and 2-3 social highlights.
+- If it's the off-season, lean hard into free agency, trades, draft, coaching moves.
+- Write like a smart friend who follows the NFL obsessively, not a press release.
+- No fluff, no filler. Every sentence should earn its place."""
+
 def run_digest():
     now           = datetime.now(EASTERN)
     yesterday_fmt = (now - timedelta(days=1)).strftime("%Y%m%d")
@@ -212,20 +205,108 @@ def run_digest():
     yesterday_games = get_nfl_scores(yesterday_fmt)
     upcoming_games  = get_nfl_scores(today_fmt)
     news            = get_nfl_news(limit=10)
-    reddit_buzz     = get_reddit_buzz(limit=15)
+    reddit_buzz     = get_reddit_top("nfl", limit=15)
 
-    context = build_context(yesterday_games, upcoming_games, news, reddit_buzz, report_date)
-    digest  = generate_update(context, report_date)
+    lines = [f"Report date: {report_date}", ""]
+    lines.append("=== YESTERDAY'S NFL SCORES ===")
+    if yesterday_games:
+        for g in yesterday_games:
+            lines.append("  " + fmt_score(g))
+    else:
+        lines.append("  No games yesterday (off-season or bye week).")
+    lines.append("")
+    lines.append("=== UPCOMING / IN-PROGRESS GAMES ===")
+    if upcoming_games:
+        for g in upcoming_games:
+            lines.append("  " + fmt_score(g))
+    else:
+        lines.append("  No games currently scheduled in the near term.")
+    lines.append("")
+    lines.append("=== LATEST ESPN NFL NEWS ===")
+    for item in (news or ["No news available."]):
+        lines.append(f"  • {item}")
+    lines.append("")
+    lines.append("=== REDDIT r/nfl — TOP POSTS TODAY ===")
+    for item in (reddit_buzz or ["No posts found."]):
+        lines.append(f"  • {item}")
 
+    context = "\n".join(lines)
+    print(context)
+
+    resp = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1100,
+        system=NFL_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": (
+            f"Here is today's NFL data for {report_date}:\n\n{context}\n\n"
+            "Write the daily NFL Telegram digest now. Follow the system rules exactly."
+        )}],
+    )
+    digest = resp.content[0].text.strip()
+    print(digest)
+    send_telegram(digest)
+
+
+# ── Fantasy Digest ────────────────────────────────────────────────────────────
+FANTASY_SYSTEM_PROMPT = """You are a sharp fantasy football analyst writing a daily Telegram briefing.
+Focus entirely on what matters for fantasy football managers — not general NFL interest.
+
+RULES:
+- ONE message only. No multi-part replies.
+- Absolute max: 550 words / ~3,000 characters.
+- Use Telegram HTML only: <b>bold</b>, <i>italic</i>. No markdown, no asterisks.
+- Structure with clear emoji section headers so it's skimmable.
+- Always lead with the injury report — that's the #1 thing fantasy managers need.
+- Then: start/sit implications, waiver wire targets, trending players, matchup notes.
+- Call out specific players by name — be actionable, not vague.
+- If it's the off-season, focus on: depth chart battles, camp standouts, ADP movers, rookie hype.
+- Write like a fantasy expert texting their league group chat. Sharp, direct, no fluff."""
+
+def run_fantasy_digest():
+    now         = datetime.now(EASTERN)
+    report_date = now.strftime("%B %-d, %Y")
+
+    print(f"[{now.isoformat()}] Running fantasy digest…")
+
+    injuries    = get_nfl_injuries()
+    news        = get_nfl_news(limit=15)
+    reddit_buzz = get_reddit_top("fantasyfootball", limit=15)
+
+    lines = [f"Report date: {report_date} (Fantasy Focus)", ""]
+    lines.append("=== INJURY REPORT ===")
+    for item in (injuries or ["No significant injuries reported."]):
+        lines.append(f"  • {item}")
+    lines.append("")
+    lines.append("=== NFL NEWS (fantasy lens) ===")
+    for item in (news or ["No news available."]):
+        lines.append(f"  • {item}")
+    lines.append("")
+    lines.append("=== r/fantasyfootball — TOP POSTS TODAY ===")
+    for item in (reddit_buzz or ["No posts found."]):
+        lines.append(f"  • {item}")
+
+    context = "\n".join(lines)
+    print(context)
+
+    resp = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1100,
+        system=FANTASY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": (
+            f"Here is today's fantasy football data for {report_date}:\n\n{context}\n\n"
+            "Write the fantasy football Telegram digest now. Follow the system rules exactly."
+        )}],
+    )
+    digest = resp.content[0].text.strip()
     print(digest)
     send_telegram(digest)
 
 
 # ── Telegram polling ──────────────────────────────────────────────────────────
 def poll():
-    """Long-poll Telegram for incoming messages. Handles /update and /nfl commands."""
+    """Long-poll Telegram for incoming commands."""
     offset = None
-    print("Polling for Telegram commands…")
+    print("Polling for Telegram commands… (/update, /nfl, /fantasy)")
 
     while True:
         try:
@@ -241,22 +322,29 @@ def poll():
             updates = resp.json().get("result", [])
 
             for update in updates:
-                offset = update["update_id"] + 1
+                offset  = update["update_id"] + 1
                 msg     = update.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text    = msg.get("text", "").strip().lower().split()[0] if msg.get("text") else ""
 
-                # Only respond to the configured chat
                 if chat_id != str(TELEGRAM_CHAT_ID):
                     continue
 
                 if text in ("/update", "/nfl"):
-                    print(f"[CMD] {text} received — running digest…")
+                    print(f"[CMD] {text} — running NFL digest…")
                     send_typing()
                     try:
                         run_digest()
                     except Exception as e:
-                        send_telegram(f"<b>Error running update:</b> {e}")
+                        send_telegram(f"<b>Error:</b> {e}")
+
+                elif text == "/fantasy":
+                    print("[CMD] /fantasy — running fantasy digest…")
+                    send_typing()
+                    try:
+                        run_fantasy_digest()
+                    except Exception as e:
+                        send_telegram(f"<b>Error:</b> {e}")
 
         except Exception as e:
             print(f"[WARN] Poll error: {e} — retrying in 5s")
@@ -265,11 +353,8 @@ def poll():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Schedule nightly digest at midnight Eastern (auto-handles EST/EDT)
     scheduler = BackgroundScheduler(timezone=EASTERN)
     scheduler.add_job(run_digest, "cron", hour=0, minute=0)
     scheduler.start()
-    print("Scheduler started — nightly digest at 12:00 AM ET.")
-
-    # Block on Telegram polling
+    print("Scheduler started — nightly NFL digest at 12:00 AM ET.")
     poll()
