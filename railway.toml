@@ -2,6 +2,4 @@
 builder = "NIXPACKS"
 
 [deploy]
-# 12:00 AM EDT (UTC-4, daylight saving time)
-cronSchedule = "0 4 * * *"
 startCommand = "python bot.py"

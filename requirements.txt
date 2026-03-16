@@ -1,2 +1,4 @@
 anthropic>=0.40.0
 requests>=2.31.0
+apscheduler>=3.10.0
+pytz>=2024.1
