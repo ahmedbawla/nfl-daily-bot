@@ -605,6 +605,27 @@ def run_agent(chat_id: str, user_text: str):
     today = datetime.now(EASTERN).strftime("%B %-d, %Y")
     system = AGENT_SYSTEM_PROMPT.replace("{today}", today)
 
+    # Inject this user's fantasy roster so BILL can answer team questions
+    agent = fantasy_agents.get(chat_id)
+    if agent:
+        try:
+            roster = agent.roster_summary()
+            starters = ", ".join(
+                f"{p['name']} ({p['position']}, {p['team']}{', ' + p['status'] if p['status'] not in ('Active','') else ''})"
+                for p in roster["starters"]
+            )
+            bench = ", ".join(
+                f"{p['name']} ({p['position']}, {p['team']}{', ' + p['status'] if p['status'] not in ('Active','') else ''})"
+                for p in roster["bench"]
+            )
+            system += (
+                f"\n\nThis user's current fantasy roster (Sleeper):\n"
+                f"Starters: {starters}\n"
+                f"Bench: {bench}"
+            )
+        except Exception as e:
+            print(f"[Roster context] {e}")
+
     conversation_history[chat_id].append({"role": "user", "content": user_text})
     messages = list(conversation_history[chat_id])
 
