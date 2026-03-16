@@ -42,33 +42,34 @@ def send_messages(chat_id: str, text: str):
 
 # ── FantasyAgent class ────────────────────────────────────────────────────────
 class FantasyAgent:
-    def __init__(self, username: str, password: str, league_id: str, chat_id: str):
+    def __init__(self, username: str, league_id: str, chat_id: str):
         self.username   = username
-        self.password   = password
         self.league_id  = league_id
         self.chat_id    = chat_id
-        self._token     = None
+        self._token     = None   # write ops unavailable via public API
         self._user_id   = None
         self._roster_id = None
         self._players   = {}   # full player cache
 
     # ── Auth ──────────────────────────────────────────────────────────────────
     def login(self):
-        resp = requests.post(f"{SLEEPER_BASE}/login", json={
-            "login": self.username, "password": self.password,
-        }, timeout=10)
+        """Resolve username → user_id using Sleeper's public read API."""
+        resp = requests.get(f"{SLEEPER_BASE}/user/{self.username}", timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        self._token   = data.get("token")
-        self._user_id = str(data.get("user_id", ""))
+        if not data or not data.get("user_id"):
+            raise RuntimeError(f"Sleeper user '{self.username}' not found.")
+        self._user_id = str(data["user_id"])
 
     def init(self):
-        """Login, find roster, warm player cache. Raises on bad credentials."""
+        """Resolve user, find roster, warm player cache."""
         self.login()
         self._load_my_roster()
         self._cache_players()
 
     def _headers(self):
+        if not self._token:
+            raise RuntimeError("Sleeper write operations require authentication (token not available).")
         return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
 
     def _notify(self, text: str):

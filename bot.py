@@ -53,7 +53,7 @@ def _load_users():
             users = json.load(f)
         for cid, u in users.items():
             try:
-                agent = FantasyAgent(u["username"], u["password"], u["league_id"], cid)
+                agent = FantasyAgent(u["username"], u["league_id"], cid)
                 agent.init()
                 fantasy_agents[cid] = agent
                 print(f"[Users] Restored agent for chat {cid}")
@@ -74,13 +74,13 @@ def _delete_user(chat_id: str):
         pass
 
 
-def _save_user(chat_id: str, username: str, password: str, league_id: str):
+def _save_user(chat_id: str, username: str, league_id: str):
     try:
         with open(USERS_FILE) as f:
             users = json.load(f)
     except FileNotFoundError:
         users = {}
-    users[chat_id] = {"username": username, "password": password, "league_id": league_id}
+    users[chat_id] = {"username": username, "league_id": league_id}
     with open(USERS_FILE, "w") as f:
         json.dump(users, f)
 
@@ -255,15 +255,9 @@ def handle_onboarding(chat_id: str, text: str) -> bool:
 
     if state == "username":
         ONBOARD_DATA[chat_id]["username"] = text
-        ONBOARD_STATE[chat_id] = "password"
-        send_telegram("Got it. Now your <b>Sleeper password</b>?", chat_id)
-        return True
-
-    if state == "password":
-        ONBOARD_DATA[chat_id]["password"] = text
         ONBOARD_STATE[chat_id] = "league"
         send_telegram(
-            "Almost there. What's your <b>league ID</b>?\n"
+            "Got it. What's your <b>league ID</b>?\n"
             "<i>(Find it in your league URL: sleeper.com/leagues/<b>XXXXXXXXX</b>)</i>",
             chat_id,
         )
@@ -274,10 +268,10 @@ def handle_onboarding(chat_id: str, text: str) -> bool:
         d = ONBOARD_DATA[chat_id]
         send_telegram("Connecting to Sleeper…", chat_id)
         try:
-            agent = FantasyAgent(d["username"], d["password"], text, chat_id)
+            agent = FantasyAgent(d["username"], text, chat_id)
             agent.init()
             fantasy_agents[chat_id] = agent
-            _save_user(chat_id, d["username"], d["password"], text)
+            _save_user(chat_id, d["username"], text)
             del ONBOARD_STATE[chat_id]
             del ONBOARD_DATA[chat_id]
             send_telegram(
