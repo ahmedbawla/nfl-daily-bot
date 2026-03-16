@@ -19,18 +19,53 @@ from collections import defaultdict
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 from nfl_tools import NFL_TOOLS, TOOL_DISPATCH
-import fantasy_agent as fa
+from fantasy_agent import FantasyAgent, send_message, send_messages
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]   # owner — gets nightly digest
 
 client  = Anthropic()
 HEADERS = {"User-Agent": "NFLDailyBot/1.0 (Telegram digest bot)"}
 EASTERN = pytz.timezone("America/New_York")
 
-# Conversation history per chat_id — enables follow-up questions
-conversation_history = defaultdict(list)
+# ── Per-user state ────────────────────────────────────────────────────────────
+conversation_history = defaultdict(list)  # chat_id → message history
+fantasy_agents: dict[str, FantasyAgent] = {}  # chat_id → FantasyAgent
+
+# Onboarding state machine
+ONBOARD_STATE = {}   # chat_id → "username" | "password" | "league"
+ONBOARD_DATA  = {}   # chat_id → {"username": ..., "password": ...}
+
+USERS_FILE = "users.json"
+
+
+def _load_users():
+    """Load saved user credentials and restore FantasyAgent instances."""
+    try:
+        with open(USERS_FILE) as f:
+            users = json.load(f)
+        for cid, u in users.items():
+            try:
+                agent = FantasyAgent(u["username"], u["password"], u["league_id"], cid)
+                agent.init()
+                fantasy_agents[cid] = agent
+                print(f"[Users] Restored agent for chat {cid}")
+            except Exception as e:
+                print(f"[Users] Could not restore agent for {cid}: {e}")
+    except FileNotFoundError:
+        pass
+
+
+def _save_user(chat_id: str, username: str, password: str, league_id: str):
+    try:
+        with open(USERS_FILE) as f:
+            users = json.load(f)
+    except FileNotFoundError:
+        users = {}
+    users[chat_id] = {"username": username, "password": password, "league_id": league_id}
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
 
 
 # ── ESPN Scoreboard ───────────────────────────────────────────────────────────
@@ -166,10 +201,11 @@ def get_reddit_top(subreddit: str, limit: int = 15) -> list[str]:
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
-def send_telegram(text: str):
+def send_telegram(text: str, chat_id: str = None):
+    cid  = chat_id or TELEGRAM_CHAT_ID
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     resp = requests.post(url, json={
-        "chat_id":                  TELEGRAM_CHAT_ID,
+        "chat_id":                  cid,
         "text":                     text,
         "parse_mode":               "HTML",
         "disable_web_page_preview": True,
@@ -181,12 +217,80 @@ def send_telegram(text: str):
         print("✓ Message sent.")
 
 
-def send_typing():
+def send_typing(chat_id: str = None):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction",
-        json={"chat_id": TELEGRAM_CHAT_ID, "action": "typing"},
+        json={"chat_id": chat_id or TELEGRAM_CHAT_ID, "action": "typing"},
         timeout=5,
     )
+
+
+# ── Onboarding ────────────────────────────────────────────────────────────────
+def handle_onboarding(chat_id: str, text: str) -> bool:
+    """
+    Returns True if this message was consumed by onboarding.
+    New users are intercepted here before reaching the agent.
+    """
+    # Trigger onboarding for users we haven't seen yet
+    if chat_id not in fantasy_agents and chat_id not in ONBOARD_STATE:
+        ONBOARD_STATE[chat_id] = "username"
+        ONBOARD_DATA[chat_id]  = {}
+        send_telegram(
+            "Hey! I'm <b>BILL</b> 🏈 — your NFL expert and fantasy manager.\n\n"
+            "Let's link your Sleeper account. What's your <b>Sleeper username</b>?",
+            chat_id,
+        )
+        return True
+
+    state = ONBOARD_STATE.get(chat_id)
+    if not state:
+        return False
+
+    if state == "username":
+        ONBOARD_DATA[chat_id]["username"] = text
+        ONBOARD_STATE[chat_id] = "password"
+        send_telegram("Got it. Now your <b>Sleeper password</b>?", chat_id)
+        return True
+
+    if state == "password":
+        ONBOARD_DATA[chat_id]["password"] = text
+        ONBOARD_STATE[chat_id] = "league"
+        send_telegram(
+            "Almost there. What's your <b>league ID</b>?\n"
+            "<i>(Find it in your league URL: sleeper.com/leagues/<b>XXXXXXXXX</b>)</i>",
+            chat_id,
+        )
+        return True
+
+    if state == "league":
+        ONBOARD_DATA[chat_id]["league_id"] = text
+        d = ONBOARD_DATA[chat_id]
+        send_telegram("Connecting to Sleeper…", chat_id)
+        try:
+            agent = FantasyAgent(d["username"], d["password"], text, chat_id)
+            agent.init()
+            fantasy_agents[chat_id] = agent
+            _save_user(chat_id, d["username"], d["password"], text)
+            del ONBOARD_STATE[chat_id]
+            del ONBOARD_DATA[chat_id]
+            send_telegram(
+                "✅ All set! Your fantasy team is linked and I'm managing it autonomously.\n\n"
+                "You can now ask me anything about the NFL, or tell me to make a move:\n"
+                "<i>\"Start Lamar over Mahomes this week\"</i>\n"
+                "<i>\"Drop [Player] and pick up [Player]\"</i>\n"
+                "<i>\"What do you think about trading X for Y?\"</i>",
+                chat_id,
+            )
+        except Exception as e:
+            ONBOARD_STATE[chat_id] = "username"
+            ONBOARD_DATA[chat_id]  = {}
+            send_telegram(
+                f"❌ Couldn't connect: <i>{e}</i>\n\nLet's try again. What's your Sleeper username?",
+                chat_id,
+            )
+        return True
+
+    return False
 
 
 # ── NFL Digest ────────────────────────────────────────────────────────────────
@@ -405,6 +509,81 @@ def _prune_history(chat_id: str, max_turns: int = 20):
         history = conversation_history[chat_id]
 
 
+MOVE_SYSTEM = """You are BILL managing a fantasy football roster on behalf of the user.
+The user has given you a direct instruction to make a roster move.
+Determine exactly what action to take and return ONLY valid JSON:
+{
+  "action": "set_lineup"|"waiver_claim"|"propose_trade"|"no_action",
+  "reasoning": "brief explanation",
+  "starters": [...player_ids...],
+  "add_player_id": "...",
+  "drop_player_id": "...",
+  "trade_give": [...player_ids...],
+  "trade_get":  [...player_ids...],
+  "trade_target_roster_id": 1,
+  "reply": "casual message back to user confirming what you did"
+}
+If the instruction is unclear or you need more info, set action to no_action and explain in reply."""
+
+def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
+    """
+    If the user's message looks like a direct roster instruction, execute it.
+    Returns True if we handled it, False if it's just a question.
+    """
+    agent = fantasy_agents.get(chat_id)
+    if not agent:
+        return False
+
+    # Ask Claude if this is an action command or just a question
+    classify = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=10,
+        messages=[{"role": "user", "content":
+            f"Is this a direct fantasy football roster action instruction (start/drop/add/trade/bench someone)? "
+            f"Reply only YES or NO.\n\nMessage: {user_text}"}],
+    )
+    if "YES" not in classify.content[0].text.upper():
+        return False
+
+    # It's a command — get roster context and execute
+    try:
+        roster = agent.roster_summary()
+        projs  = agent.get_projections(agent.get_current_week())
+        avail  = agent.available_players(limit=20)
+        for p in roster["starters"] + roster["bench"] + avail:
+            p["projected_pts"] = projs.get(p["id"], {}).get("pts_ppr", 0)
+
+        prompt = (
+            f"User instruction: \"{user_text}\"\n\n"
+            f"Current roster:\n{json.dumps(roster, default=str)}\n\n"
+            f"Available free agents:\n{json.dumps(avail[:10], default=str)}\n\n"
+            "Execute the instruction. Return JSON only."
+        )
+        resp = client.messages.create(
+            model="claude-opus-4-6", max_tokens=600,
+            system=MOVE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        d   = json.loads(raw)
+
+        action = d.get("action")
+        if action == "set_lineup" and d.get("starters"):
+            agent.set_starters(d["starters"])
+        elif action == "waiver_claim" and d.get("add_player_id"):
+            agent.submit_waiver(d["add_player_id"], d.get("drop_player_id", ""))
+        elif action == "propose_trade" and d.get("trade_give") and d.get("trade_get"):
+            agent.propose_trade(d["trade_target_roster_id"], d["trade_give"], d["trade_get"])
+
+        reply = d.get("reply", "Done.")
+        send_telegram(reply, chat_id)
+        return True
+
+    except Exception as e:
+        print(f"[Fantasy command error] {e}")
+        return False
+
+
 def run_agent(chat_id: str, user_text: str):
     today = datetime.now(EASTERN).strftime("%B %-d, %Y")
     system = AGENT_SYSTEM_PROMPT.replace("{today}", today)
@@ -456,8 +635,8 @@ def run_agent(chat_id: str, user_text: str):
     # Split on ||| and send each chunk as a separate Telegram message
     parts = [p.strip() for p in final.split("|||") if p.strip()]
     for part in parts:
-        send_telegram(part)
-        time.sleep(0.3)  # slight delay so messages arrive in order
+        send_telegram(part, chat_id)
+        time.sleep(0.3)
 
 
 # ── Telegram polling ──────────────────────────────────────────────────────────
@@ -486,41 +665,42 @@ def poll():
                 raw_text    = msg.get("text", "").strip()
                 cmd         = raw_text.lower().split()[0] if raw_text else ""
 
-                if chat_id != str(TELEGRAM_CHAT_ID):
+                if not raw_text:
                     continue
 
-                if cmd in ("/update", "/nfl"):
-                    print(f"[CMD] {cmd} — running NFL digest…")
-                    send_typing()
-                    try:
-                        run_digest()
-                    except Exception as e:
-                        send_telegram(f"<b>Error:</b> {e}")
+                # Commands only for the owner
+                if cmd in ("/update", "/nfl") and chat_id == TELEGRAM_CHAT_ID:
+                    send_typing(chat_id)
+                    try:    run_digest()
+                    except Exception as e: send_telegram(f"<b>Error:</b> {e}")
 
-                elif cmd == "/fantasy":
-                    print("[CMD] /fantasy — running fantasy digest…")
-                    send_typing()
-                    try:
-                        run_fantasy_digest()
-                    except Exception as e:
-                        send_telegram(f"<b>Error:</b> {e}")
+                elif cmd == "/fantasy" and chat_id == TELEGRAM_CHAT_ID:
+                    send_typing(chat_id)
+                    try:    run_fantasy_digest()
+                    except Exception as e: send_telegram(f"<b>Error:</b> {e}")
 
-                elif cmd == "/draft":
-                    print("[CMD] /draft — running draft digest…")
-                    send_typing()
-                    try:
-                        run_draft_digest()
-                    except Exception as e:
-                        send_telegram(f"<b>Error:</b> {e}")
+                elif cmd == "/draft" and chat_id == TELEGRAM_CHAT_ID:
+                    send_typing(chat_id)
+                    try:    run_draft_digest()
+                    except Exception as e: send_telegram(f"<b>Error:</b> {e}")
 
-                elif raw_text and not cmd.startswith("/"):
-                    # Free-form question → all-knowing NFL agent
-                    print(f"[AGENT] '{raw_text[:80]}'")
-                    send_typing()
+                elif not cmd.startswith("/"):
+                    # Step 1: onboarding (new users)
+                    if handle_onboarding(chat_id, raw_text):
+                        continue
+
+                    send_typing(chat_id)
+
+                    # Step 2: direct fantasy roster command?
                     try:
-                        run_agent(chat_id, raw_text)
+                        if handle_fantasy_command(chat_id, raw_text):
+                            continue
                     except Exception as e:
-                        send_telegram(f"<b>Error:</b> {e}")
+                        print(f"[Fantasy command error] {e}")
+
+                    # Step 3: general NFL Q&A with BILL
+                    try:    run_agent(chat_id, raw_text)
+                    except Exception as e: send_telegram(f"<b>Error:</b> {e}", chat_id)
 
         except Exception as e:
             print(f"[WARN] Poll error: {e} — retrying in 5s")
@@ -528,39 +708,34 @@ def poll():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+def _run_all_agents(method: str):
+    """Run a FantasyAgent method for every registered user."""
+    for cid, agent in list(fantasy_agents.items()):
+        try:
+            getattr(agent, method)()
+        except Exception as e:
+            print(f"[Fantasy:{cid}] {method} error: {e}")
+
+
 if __name__ == "__main__":
+    # Restore previously onboarded users
+    _load_users()
+
     scheduler = BackgroundScheduler(timezone=EASTERN)
 
-    # ── NFL digest ──────────────────────────────────────────────────────────
+    # ── NFL digest (owner only) ──────────────────────────────────────────────
     scheduler.add_job(run_digest, "cron", hour=0, minute=0)
 
-    # ── Fantasy agent ───────────────────────────────────────────────────────
-    # Init (login + cache) runs once at startup, not on a schedule
-    try:
-        fa.init()
-        fantasy_enabled = True
-    except Exception as e:
-        print(f"[Fantasy] Init failed (check SLEEPER_* env vars): {e}")
-        fantasy_enabled = False
-
-    if fantasy_enabled:
-        # Daily lineup check — 7 AM ET
-        scheduler.add_job(fa.optimize_lineup, "cron", hour=7, minute=0)
-        # Waiver wire — Tuesday 9 AM ET (after Monday night final)
-        scheduler.add_job(fa.check_waivers, "cron", day_of_week="tue", hour=9, minute=0)
-        # Lineup confirm after waivers process — Wednesday 9 AM ET
-        scheduler.add_job(fa.optimize_lineup, "cron", day_of_week="wed", hour=9, minute=0)
-        # Final lineup lock check — Sunday 11:30 AM ET
-        scheduler.add_job(fa.optimize_lineup, "cron", day_of_week="sun", hour=11, minute=30)
-        # Weekly recap — Tuesday 9:30 AM ET
-        scheduler.add_job(fa.weekly_recap, "cron", day_of_week="tue", hour=9, minute=30)
-        # Notable performances — Sunday 9 PM and Monday 11:30 PM ET
-        scheduler.add_job(fa.notable_performances, "cron", day_of_week="sun", hour=21, minute=0)
-        scheduler.add_job(fa.notable_performances, "cron", day_of_week="mon", hour=23, minute=30)
-        # Trade check — every 4 hours
-        scheduler.add_job(fa.check_trades, "interval", hours=4)
-        print("Fantasy agent scheduled and running.")
+    # ── Fantasy agent (all registered users) ────────────────────────────────
+    scheduler.add_job(lambda: _run_all_agents("optimize_lineup"),       "cron", hour=7, minute=0)
+    scheduler.add_job(lambda: _run_all_agents("check_waivers"),         "cron", day_of_week="tue", hour=9, minute=0)
+    scheduler.add_job(lambda: _run_all_agents("optimize_lineup"),       "cron", day_of_week="wed", hour=9, minute=0)
+    scheduler.add_job(lambda: _run_all_agents("optimize_lineup"),       "cron", day_of_week="sun", hour=11, minute=30)
+    scheduler.add_job(lambda: _run_all_agents("weekly_recap"),          "cron", day_of_week="tue", hour=9, minute=30)
+    scheduler.add_job(lambda: _run_all_agents("notable_performances"),  "cron", day_of_week="sun", hour=21, minute=0)
+    scheduler.add_job(lambda: _run_all_agents("notable_performances"),  "cron", day_of_week="mon", hour=23, minute=30)
+    scheduler.add_job(lambda: _run_all_agents("check_trades"),          "interval", hours=4)
 
     scheduler.start()
-    print("Scheduler started — nightly NFL digest at 12:00 AM ET.")
+    print(f"Ready. {len(fantasy_agents)} fantasy agent(s) loaded.")
     poll()
