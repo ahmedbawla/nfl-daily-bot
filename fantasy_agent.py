@@ -127,7 +127,15 @@ class FantasyAgent:
         return resp.json() if resp.ok else {}
 
     def get_current_week(self) -> int:
-        return int(self.get_league().get("settings", {}).get("leg", 1))
+        week = self.get_league().get("settings", {}).get("leg") or 0
+        return max(int(week), 1)
+
+    def is_season_active(self) -> bool:
+        """Returns False during off-season or before week 1 kicks off."""
+        league = self.get_league()
+        status = league.get("status", "")
+        week   = int(league.get("settings", {}).get("leg") or 0)
+        return status == "in_season" and week >= 1
 
     def _cache_players(self):
         if not self._players:
@@ -167,6 +175,119 @@ class FantasyAgent:
                 "trending": pid in trending, "status": status or "Active",
             })
         return avail[:limit]
+
+    # ── Draft ─────────────────────────────────────────────────────────────────
+    def get_league_draft(self) -> dict | None:
+        """Return the most recent draft for this league, or None."""
+        drafts = self._get(f"/league/{self.league_id}/drafts") or []
+        if not drafts:
+            return None
+        # Prefer the one that is 'drafting' or most recent 'complete'
+        for d in drafts:
+            if d.get("status") == "drafting":
+                return d
+        return drafts[-1] if drafts else None
+
+    def get_draft_picks(self, draft_id: str) -> list:
+        return self._get(f"/draft/{draft_id}/picks") or []
+
+    def is_my_pick(self, draft: dict) -> bool:
+        """True if it is currently this user's turn to pick."""
+        if draft.get("status") != "drafting":
+            return False
+        picks_made = draft.get("last_picked", 0)
+        total_slots = draft.get("settings", {}).get("slots", 0)
+        if picks_made >= total_slots:
+            return False
+        # Determine whose slot this is from the draft order
+        order = draft.get("draft_order") or {}
+        slot  = (picks_made % len(order)) + 1 if order else None
+        if slot is None:
+            return False
+        # draft_order maps user_id → slot number
+        my_slot = order.get(self._user_id)
+        # Snake draft: odd rounds go forward, even rounds go backward
+        round_num = (picks_made // len(order)) + 1 if order else 1
+        if round_num % 2 == 0:  # reverse direction
+            slot = len(order) - slot + 1
+        return str(my_slot) == str(slot)
+
+    def make_draft_pick(self, draft_id: str) -> bool:
+        """Pick the best available player for our positional need."""
+        picks      = self.get_draft_picks(draft_id)
+        taken_ids  = {p["player_id"] for p in picks}
+        my_picks   = [p["player_id"] for p in picks if str(p.get("picked_by")) == self._user_id]
+
+        # Count positions already drafted
+        pos_count: dict[str, int] = {}
+        for pid in my_picks:
+            pos = self._players.get(str(pid), {}).get("position", "")
+            pos_count[pos] = pos_count.get(pos, 0) + 1
+
+        # Positional need priority (standard league targets)
+        need_order = []
+        if pos_count.get("QB", 0) < 1:   need_order.append("QB")
+        if pos_count.get("RB", 0) < 4:   need_order.append("RB")
+        if pos_count.get("WR", 0) < 4:   need_order.append("WR")
+        if pos_count.get("TE", 0) < 2:   need_order.append("TE")
+        if pos_count.get("QB", 0) < 2:   need_order.append("QB")
+        if pos_count.get("K",  0) < 1:   need_order.append("K")
+        if pos_count.get("DEF",0) < 1:   need_order.append("DEF")
+        if not need_order:
+            need_order = ["RB", "WR", "QB", "TE"]
+
+        # Build ranked available list using BILL's sleeper analysis if possible
+        try:
+            sleeper_data = nfl_tools.get_sleeper_candidates()
+            ranked = [c["player"] for c in sleeper_data.get("candidates", [])]
+        except Exception:
+            ranked = []
+
+        # Score each available player: prefer BILL's ranked list, then by position need
+        best_pid = None
+        for pos in need_order:
+            for pid, p in self._players.items():
+                if pid in taken_ids:
+                    continue
+                if p.get("position") != pos:
+                    continue
+                if p.get("injury_status") in ["IR", "PUP", "Out"]:
+                    continue
+                best_pid = pid
+                # Check if BILL ranked this player highly
+                name = p.get("full_name", "")
+                if any(name in r for r in ranked[:20]):
+                    break  # great pick, stop here
+            if best_pid:
+                break
+
+        if not best_pid:
+            return False
+
+        name = self.player_name(best_pid)
+        resp = requests.post(
+            f"{SLEEPER_BASE}/draft/{draft_id}/pick",
+            headers=self._headers(),
+            json={"player_id": best_pid},
+            timeout=10,
+        )
+        if resp.ok:
+            self._notify(f"🏈 Drafted <b>{name}</b>")
+            print(f"[Draft:{self.chat_id}] Picked {name} ({best_pid})")
+        else:
+            print(f"[Draft:{self.chat_id}] Pick failed: {resp.status_code} {resp.text}")
+        return resp.ok
+
+    def check_draft(self):
+        """Poll the draft and pick if it's our turn. Call frequently during draft window."""
+        draft = self.get_league_draft()
+        if not draft or draft.get("status") != "drafting":
+            return
+        draft_id = draft["id"]
+        # Refresh draft state
+        draft = self._get(f"/draft/{draft_id}")
+        if self.is_my_pick(draft):
+            self.make_draft_pick(draft_id)
 
     def roster_summary(self) -> dict:
         roster   = self.get_my_roster()
@@ -290,6 +411,8 @@ Return ONLY valid JSON — no extra text:
 
     # ── Agent tasks ───────────────────────────────────────────────────────────
     def optimize_lineup(self):
+        if not self.is_season_active():
+            return
         print(f"[Fantasy:{self.chat_id}] Optimizing lineup…")
         week   = self.get_current_week()
         roster = self.roster_summary()
@@ -306,6 +429,8 @@ Return ONLY valid JSON — no extra text:
             print(f"[Fantasy] optimize_lineup error: {e}")
 
     def check_waivers(self):
+        if not self.is_season_active():
+            return
         print(f"[Fantasy:{self.chat_id}] Checking waivers…")
         week   = self.get_current_week()
         roster = self.roster_summary()
@@ -325,6 +450,8 @@ Return ONLY valid JSON — no extra text:
             print(f"[Fantasy] check_waivers error: {e}")
 
     def check_trades(self):
+        if not self.is_season_active():
+            return
         print(f"[Fantasy:{self.chat_id}] Checking trades…")
         week  = self.get_current_week()
         txns  = self.get_transactions(week)
@@ -385,6 +512,8 @@ Return ONLY valid JSON — no extra text:
             print(f"[Fantasy] hunt_trades error: {e}")
 
     def weekly_recap(self):
+        if not self.is_season_active():
+            return
         print(f"[Fantasy:{self.chat_id}] Sending weekly recap…")
         week = self.get_current_week() - 1
         if week < 1:
@@ -425,6 +554,8 @@ Return ONLY valid JSON — no extra text:
         self._notify_multi(bill_take)
 
     def notable_performances(self):
+        if not self.is_season_active():
+            return
         print(f"[Fantasy:{self.chat_id}] Checking notable performances…")
         week  = self.get_current_week()
         stats = self.get_stats(week)

@@ -764,6 +764,8 @@ if __name__ == "__main__":
     scheduler.add_job(lambda: _run_all_agents("notable_performances"),  "cron", day_of_week="sun", hour=21, minute=0)
     scheduler.add_job(lambda: _run_all_agents("notable_performances"),  "cron", day_of_week="mon", hour=23, minute=30)
     scheduler.add_job(lambda: _run_all_agents("check_trades"),          "interval", hours=4)
+    # Draft monitor — runs every 30 s so we never miss our pick
+    scheduler.add_job(lambda: _run_all_agents("check_draft"),           "interval", seconds=30)
 
     scheduler.start()
     print(f"Ready. {len(fantasy_agents)} fantasy agent(s) loaded.")
