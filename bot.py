@@ -37,7 +37,10 @@ fantasy_agents: dict[str, FantasyAgent] = {}  # chat_id → FantasyAgent
 ONBOARD_STATE = {}   # chat_id → "username" | "password" | "league"
 ONBOARD_DATA  = {}   # chat_id → {"username": ..., "password": ...}
 
-USERS_FILE = "users.json"
+USERS_FILE = "/data/users.json"
+
+
+os.makedirs("/data", exist_ok=True)
 
 
 def _load_users():
@@ -53,6 +56,17 @@ def _load_users():
                 print(f"[Users] Restored agent for chat {cid}")
             except Exception as e:
                 print(f"[Users] Could not restore agent for {cid}: {e}")
+    except FileNotFoundError:
+        pass
+
+
+def _delete_user(chat_id: str):
+    try:
+        with open(USERS_FILE) as f:
+            users = json.load(f)
+        users.pop(chat_id, None)
+        with open(USERS_FILE, "w") as f:
+            json.dump(users, f)
     except FileNotFoundError:
         pass
 
@@ -666,6 +680,21 @@ def poll():
                 cmd         = raw_text.lower().split()[0] if raw_text else ""
 
                 if not raw_text:
+                    continue
+
+                # /reset — available to any user, restarts onboarding
+                if cmd == "/reset":
+                    fantasy_agents.pop(chat_id, None)
+                    ONBOARD_STATE.pop(chat_id, None)
+                    ONBOARD_DATA.pop(chat_id, None)
+                    conversation_history.pop(chat_id, None)
+                    _delete_user(chat_id)
+                    send_telegram(
+                        "Account unlinked. Let's start fresh!\n\nWhat's your <b>Sleeper username</b>?",
+                        chat_id,
+                    )
+                    ONBOARD_STATE[chat_id] = "username"
+                    ONBOARD_DATA[chat_id]  = {}
                     continue
 
                 # Commands only for the owner
