@@ -647,9 +647,21 @@ def run_agent(chat_id: str, user_text: str):
 
 
 # ── Telegram polling ──────────────────────────────────────────────────────────
+def clear_webhook():
+    """Delete any existing webhook so long-polling works."""
+    resp = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+        json={"drop_pending_updates": False},
+        timeout=10,
+    )
+    data = resp.json()
+    print(f"[Startup] deleteWebhook → {data}")
+
+
 def poll():
     """Long-poll Telegram for incoming commands."""
     offset = None
+    clear_webhook()
     print("Polling… commands: /update /nfl /fantasy /draft  |  anything else → NFL agent")
 
     while True:
@@ -673,6 +685,13 @@ def poll():
                 cmd         = raw_text.lower().split()[0] if raw_text else ""
 
                 if not raw_text:
+                    continue
+
+                print(f"[MSG] chat={chat_id} cmd={cmd!r} text={raw_text[:60]!r}")
+
+                # /ping — health check, no external calls
+                if cmd == "/ping":
+                    send_telegram("pong 🏈", chat_id)
                     continue
 
                 # /reset — available to any user, clears all state
