@@ -37,10 +37,13 @@ fantasy_agents: dict[str, FantasyAgent] = {}  # chat_id → FantasyAgent
 ONBOARD_STATE = {}   # chat_id → "username" | "password" | "league"
 ONBOARD_DATA  = {}   # chat_id → {"username": ..., "password": ...}
 
-USERS_FILE = "/data/users.json"
+try:
+    os.makedirs("/data", exist_ok=True)
+    USERS_FILE = "/data/users.json"
+except OSError:
+    USERS_FILE = os.path.join(os.path.dirname(__file__) or ".", "users.json")
 
-
-os.makedirs("/data", exist_ok=True)
+print(f"[Storage] users file: {USERS_FILE}")
 
 
 def _load_users():
@@ -243,19 +246,9 @@ def send_typing(chat_id: str = None):
 def handle_onboarding(chat_id: str, text: str) -> bool:
     """
     Returns True if this message was consumed by onboarding.
-    New users are intercepted here before reaching the agent.
+    Only processes messages for users already in the onboarding flow.
+    Onboarding is opt-in via /setup — BILL works without it.
     """
-    # Trigger onboarding for users we haven't seen yet
-    if chat_id not in fantasy_agents and chat_id not in ONBOARD_STATE:
-        ONBOARD_STATE[chat_id] = "username"
-        ONBOARD_DATA[chat_id]  = {}
-        send_telegram(
-            "Hey! I'm <b>BILL</b> 🏈 — your NFL expert and fantasy manager.\n\n"
-            "Let's link your Sleeper account. What's your <b>Sleeper username</b>?",
-            chat_id,
-        )
-        return True
-
     state = ONBOARD_STATE.get(chat_id)
     if not state:
         return False
@@ -682,7 +675,7 @@ def poll():
                 if not raw_text:
                     continue
 
-                # /reset — available to any user, restarts onboarding
+                # /reset — available to any user, clears all state
                 if cmd == "/reset":
                     fantasy_agents.pop(chat_id, None)
                     ONBOARD_STATE.pop(chat_id, None)
@@ -690,11 +683,27 @@ def poll():
                     conversation_history.pop(chat_id, None)
                     _delete_user(chat_id)
                     send_telegram(
-                        "Account unlinked. Let's start fresh!\n\nWhat's your <b>Sleeper username</b>?",
+                        "✅ Reset! Your Sleeper account has been unlinked and chat history cleared.\n\n"
+                        "You can talk to me about anything NFL, or type /setup to link a Sleeper account.",
                         chat_id,
                     )
-                    ONBOARD_STATE[chat_id] = "username"
-                    ONBOARD_DATA[chat_id]  = {}
+                    continue
+
+                # /setup — opt-in Sleeper onboarding (any user)
+                if cmd == "/setup":
+                    if chat_id in fantasy_agents:
+                        send_telegram(
+                            "You're already linked! Type /reset first if you want to switch accounts.",
+                            chat_id,
+                        )
+                    else:
+                        ONBOARD_STATE[chat_id] = "username"
+                        ONBOARD_DATA[chat_id]  = {}
+                        send_telegram(
+                            "Let's link your Sleeper account so I can manage your fantasy team.\n\n"
+                            "What's your <b>Sleeper username</b>?",
+                            chat_id,
+                        )
                     continue
 
                 # Commands only for the owner
@@ -714,7 +723,7 @@ def poll():
                     except Exception as e: send_telegram(f"<b>Error:</b> {e}")
 
                 elif not cmd.startswith("/"):
-                    # Step 1: onboarding (new users)
+                    # Step 1: if user is mid-onboarding, continue that flow
                     if handle_onboarding(chat_id, raw_text):
                         continue
 
