@@ -46,6 +46,33 @@ except OSError:
 print(f"[Storage] users file: {USERS_FILE}")
 
 
+def _history_file(chat_id: str) -> str:
+    base = os.path.dirname(USERS_FILE)
+    return os.path.join(base, f"history_{chat_id}.json")
+
+
+def _save_history(chat_id: str):
+    """Persist the last 20 conversation turns to disk."""
+    history = list(conversation_history[chat_id])[-20:]
+    # Keep only plain-text turns (no tool blocks) — these are safe to serialize
+    clean = [m for m in history if isinstance(m.get("content"), str)]
+    try:
+        with open(_history_file(chat_id), "w") as f:
+            json.dump(clean, f)
+    except Exception as e:
+        print(f"[History] save error for {chat_id}: {e}")
+
+
+def _load_history(chat_id: str):
+    try:
+        with open(_history_file(chat_id)) as f:
+            history = json.load(f)
+        conversation_history[chat_id] = history
+        print(f"[History] Restored {len(history)} turns for chat {chat_id}")
+    except FileNotFoundError:
+        pass
+
+
 def _load_users():
     """Load saved user credentials and restore FantasyAgent instances."""
     try:
@@ -56,6 +83,7 @@ def _load_users():
                 agent = FantasyAgent(u["username"], u["league_id"], cid, u.get("token"))
                 agent.init()
                 fantasy_agents[cid] = agent
+                _load_history(cid)
                 print(f"[Users] Restored agent for chat {cid}")
             except Exception as e:
                 print(f"[Users] Could not restore agent for {cid}: {e}")
@@ -70,6 +98,11 @@ def _delete_user(chat_id: str):
         users.pop(chat_id, None)
         with open(USERS_FILE, "w") as f:
             json.dump(users, f)
+    except FileNotFoundError:
+        pass
+    # Also wipe saved history
+    try:
+        os.remove(_history_file(chat_id))
     except FileNotFoundError:
         pass
 
@@ -605,26 +638,42 @@ def run_agent(chat_id: str, user_text: str):
     today = datetime.now(EASTERN).strftime("%B %-d, %Y")
     system = AGENT_SYSTEM_PROMPT.replace("{today}", today)
 
-    # Inject this user's fantasy roster so BILL can answer team questions
+    # Inject this user's fantasy roster + available players so BILL can
+    # answer team questions, start/sit decisions, and waiver wire advice
     agent = fantasy_agents.get(chat_id)
     if agent:
         try:
             roster = agent.roster_summary()
-            starters = ", ".join(
-                f"{p['name']} ({p['position']}, {p['team']}{', ' + p['status'] if p['status'] not in ('Active','') else ''})"
-                for p in roster["starters"]
-            )
-            bench = ", ".join(
-                f"{p['name']} ({p['position']}, {p['team']}{', ' + p['status'] if p['status'] not in ('Active','') else ''})"
-                for p in roster["bench"]
-            )
-            system += (
+
+            def fmt(p):
+                suffix = f", {p['status']}" if p.get("status") not in ("Active", "", None) else ""
+                return f"{p['name']} ({p['position']}, {p['team']}{suffix})"
+
+            starters = ", ".join(fmt(p) for p in roster["starters"])
+            bench    = ", ".join(fmt(p) for p in roster["bench"])
+            system  += (
                 f"\n\nThis user's current fantasy roster (Sleeper):\n"
                 f"Starters: {starters}\n"
                 f"Bench: {bench}"
             )
         except Exception as e:
             print(f"[Roster context] {e}")
+
+        try:
+            avail = agent.available_players(limit=30)
+            # Group by position for readability
+            by_pos: dict[str, list] = {}
+            for p in avail:
+                by_pos.setdefault(p["position"], []).append(
+                    f"{p['name']} ({p['team']}{'⬆' if p.get('trending') else ''})"
+                )
+            avail_lines = "  ".join(
+                f"{pos}: {', '.join(names[:8])}"
+                for pos, names in by_pos.items()
+            )
+            system += f"\n\nTop available free agents / waiver wire:\n{avail_lines}"
+        except Exception as e:
+            print(f"[Waiver context] {e}")
 
     conversation_history[chat_id].append({"role": "user", "content": user_text})
     messages = list(conversation_history[chat_id])
@@ -669,6 +718,7 @@ def run_agent(chat_id: str, user_text: str):
     # Save only the plain-text exchange back to persistent history
     conversation_history[chat_id][-1] = {"role": "assistant", "content": final}
     _prune_history(chat_id)
+    _save_history(chat_id)
 
     # Split on ||| and send each chunk as a separate Telegram message
     parts = [p.strip() for p in final.split("|||") if p.strip()]
