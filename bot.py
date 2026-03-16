@@ -2,8 +2,9 @@
 NFL Daily Telegram Bot
 - /update or /nfl  → general NFL digest
 - /fantasy         → fantasy football focused digest
+- /draft           → NFL draft news and prospect updates
 - Midnight ET      → auto daily digest
-Sources: ESPN Scoreboard · ESPN News · ESPN Injuries · Reddit r/nfl · Reddit r/fantasyfootball
+Sources: ESPN Scoreboard · ESPN News · ESPN Injuries · Reddit r/nfl · Reddit r/fantasyfootball · Reddit r/nfldraft
 """
 
 import os
@@ -302,11 +303,70 @@ def run_fantasy_digest():
     send_telegram(digest)
 
 
+# ── Draft Digest ─────────────────────────────────────────────────────────────
+DRAFT_SYSTEM_PROMPT = """You are an NFL draft expert writing a daily Telegram briefing on the upcoming NFL Draft.
+
+RULES:
+- ONE message only. No multi-part replies.
+- Absolute max: 550 words / ~3,000 characters.
+- Use Telegram HTML only: <b>bold</b>, <i>italic</i>. No markdown, no asterisks.
+- Structure with clear emoji section headers so it's skimmable.
+- Cover: top prospect news, mock draft movement, team needs, pro day/combine results, trade rumors involving picks.
+- Name specific prospects and teams — be concrete, not generic.
+- Highlight any risers, fallers, or surprise storylines in the draft landscape.
+- Write like a draft analyst who lives and breathes tape and prospect rankings."""
+
+def run_draft_digest():
+    now         = datetime.now(EASTERN)
+    report_date = now.strftime("%B %-d, %Y")
+
+    print(f"[{now.isoformat()}] Running draft digest…")
+
+    # Pull more news since we need Claude to filter for draft-relevant items
+    news        = get_nfl_news(limit=20)
+    reddit_buzz = get_reddit_top("nfldraft", limit=15)
+    # r/NFL often has draft discussion too — grab a few extra posts
+    nfl_reddit  = get_reddit_top("nfl", limit=20)
+    draft_nfl_posts = [p for p in nfl_reddit if any(
+        kw in p.lower() for kw in ["draft", "prospect", "combine", "pro day", "mock", "pick", "round"]
+    )][:5]
+
+    lines = [f"Report date: {report_date} (NFL Draft Focus)", ""]
+    lines.append("=== NFL DRAFT NEWS (ESPN) ===")
+    for item in (news or ["No news available."]):
+        lines.append(f"  • {item}")
+    lines.append("")
+    lines.append("=== r/nfldraft — TOP POSTS TODAY ===")
+    for item in (reddit_buzz or ["No posts found."]):
+        lines.append(f"  • {item}")
+    if draft_nfl_posts:
+        lines.append("")
+        lines.append("=== r/nfl — DRAFT DISCUSSION ===")
+        for item in draft_nfl_posts:
+            lines.append(f"  • {item}")
+
+    context = "\n".join(lines)
+    print(context)
+
+    resp = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1100,
+        system=DRAFT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": (
+            f"Here is today's NFL draft data for {report_date}:\n\n{context}\n\n"
+            "Write the NFL draft Telegram digest now. Follow the system rules exactly."
+        )}],
+    )
+    digest = resp.content[0].text.strip()
+    print(digest)
+    send_telegram(digest)
+
+
 # ── Telegram polling ──────────────────────────────────────────────────────────
 def poll():
     """Long-poll Telegram for incoming commands."""
     offset = None
-    print("Polling for Telegram commands… (/update, /nfl, /fantasy)")
+    print("Polling for Telegram commands… (/update, /nfl, /fantasy, /draft)")
 
     while True:
         try:
@@ -343,6 +403,14 @@ def poll():
                     send_typing()
                     try:
                         run_fantasy_digest()
+                    except Exception as e:
+                        send_telegram(f"<b>Error:</b> {e}")
+
+                elif text == "/draft":
+                    print("[CMD] /draft — running draft digest…")
+                    send_typing()
+                    try:
+                        run_draft_digest()
                     except Exception as e:
                         send_telegram(f"<b>Error:</b> {e}")
 
