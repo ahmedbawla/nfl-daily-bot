@@ -19,6 +19,7 @@ from collections import defaultdict
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 from nfl_tools import NFL_TOOLS, TOOL_DISPATCH
+import fantasy_agent as fa
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -529,7 +530,37 @@ def poll():
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone=EASTERN)
+
+    # ── NFL digest ──────────────────────────────────────────────────────────
     scheduler.add_job(run_digest, "cron", hour=0, minute=0)
+
+    # ── Fantasy agent ───────────────────────────────────────────────────────
+    # Init (login + cache) runs once at startup, not on a schedule
+    try:
+        fa.init()
+        fantasy_enabled = True
+    except Exception as e:
+        print(f"[Fantasy] Init failed (check SLEEPER_* env vars): {e}")
+        fantasy_enabled = False
+
+    if fantasy_enabled:
+        # Daily lineup check — 7 AM ET
+        scheduler.add_job(fa.optimize_lineup, "cron", hour=7, minute=0)
+        # Waiver wire — Tuesday 9 AM ET (after Monday night final)
+        scheduler.add_job(fa.check_waivers, "cron", day_of_week="tue", hour=9, minute=0)
+        # Lineup confirm after waivers process — Wednesday 9 AM ET
+        scheduler.add_job(fa.optimize_lineup, "cron", day_of_week="wed", hour=9, minute=0)
+        # Final lineup lock check — Sunday 11:30 AM ET
+        scheduler.add_job(fa.optimize_lineup, "cron", day_of_week="sun", hour=11, minute=30)
+        # Weekly recap — Tuesday 9:30 AM ET
+        scheduler.add_job(fa.weekly_recap, "cron", day_of_week="tue", hour=9, minute=30)
+        # Notable performances — Sunday 9 PM and Monday 11:30 PM ET
+        scheduler.add_job(fa.notable_performances, "cron", day_of_week="sun", hour=21, minute=0)
+        scheduler.add_job(fa.notable_performances, "cron", day_of_week="mon", hour=23, minute=30)
+        # Trade check — every 4 hours
+        scheduler.add_job(fa.check_trades, "interval", hours=4)
+        print("Fantasy agent scheduled and running.")
+
     scheduler.start()
     print("Scheduler started — nightly NFL digest at 12:00 AM ET.")
     poll()
