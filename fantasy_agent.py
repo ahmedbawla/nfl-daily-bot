@@ -42,14 +42,18 @@ def send_messages(chat_id: str, text: str):
 
 # ── FantasyAgent class ────────────────────────────────────────────────────────
 class FantasyAgent:
-    def __init__(self, username: str, league_id: str, chat_id: str):
+    def __init__(self, username: str, league_id: str, chat_id: str, token: str = None):
         self.username   = username
         self.league_id  = league_id
         self.chat_id    = chat_id
-        self._token     = None   # write ops unavailable via public API
+        self._token     = token or None
         self._user_id   = None
         self._roster_id = None
         self._players   = {}   # full player cache
+
+    @property
+    def can_write(self) -> bool:
+        return bool(self._token)
 
     # ── Auth ──────────────────────────────────────────────────────────────────
     def login(self):
@@ -69,8 +73,11 @@ class FantasyAgent:
 
     def _headers(self):
         if not self._token:
-            raise RuntimeError("Sleeper write operations require authentication (token not available).")
-        return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+            raise RuntimeError(
+                "Write operations need your Sleeper token. "
+                "Type /setup again and include your token when prompted."
+            )
+        return {"Authorization": self._token, "Content-Type": "application/json"}
 
     def _notify(self, text: str):
         send_message(self.chat_id, text)

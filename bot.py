@@ -34,8 +34,8 @@ conversation_history = defaultdict(list)  # chat_id → message history
 fantasy_agents: dict[str, FantasyAgent] = {}  # chat_id → FantasyAgent
 
 # Onboarding state machine
-ONBOARD_STATE = {}   # chat_id → "username" | "password" | "league"
-ONBOARD_DATA  = {}   # chat_id → {"username": ..., "password": ...}
+ONBOARD_STATE = {}   # chat_id → "username" | "league" | "token"
+ONBOARD_DATA  = {}   # chat_id → {"username": ..., "league_id": ..., "token": ...}
 
 try:
     os.makedirs("/data", exist_ok=True)
@@ -53,7 +53,7 @@ def _load_users():
             users = json.load(f)
         for cid, u in users.items():
             try:
-                agent = FantasyAgent(u["username"], u["league_id"], cid)
+                agent = FantasyAgent(u["username"], u["league_id"], cid, u.get("token"))
                 agent.init()
                 fantasy_agents[cid] = agent
                 print(f"[Users] Restored agent for chat {cid}")
@@ -74,13 +74,13 @@ def _delete_user(chat_id: str):
         pass
 
 
-def _save_user(chat_id: str, username: str, league_id: str):
+def _save_user(chat_id: str, username: str, league_id: str, token: str = None):
     try:
         with open(USERS_FILE) as f:
             users = json.load(f)
     except FileNotFoundError:
         users = {}
-    users[chat_id] = {"username": username, "league_id": league_id}
+    users[chat_id] = {"username": username, "league_id": league_id, "token": token}
     with open(USERS_FILE, "w") as f:
         json.dump(users, f)
 
@@ -265,21 +265,37 @@ def handle_onboarding(chat_id: str, text: str) -> bool:
 
     if state == "league":
         ONBOARD_DATA[chat_id]["league_id"] = text
+        ONBOARD_STATE[chat_id] = "token"
+        send_telegram(
+            "Almost there! To let me set lineups, claim waivers, and make trades I need your "
+            "<b>Sleeper auth token</b>.\n\n"
+            "How to get it (30 seconds):\n"
+            "1. Open <b>sleeper.com</b> in a browser and log in\n"
+            "2. Press <b>F12</b> → <b>Application</b> tab → <b>Local Storage</b> → click <code>https://sleeper.com</code>\n"
+            "3. Find the key <code>sleeperToken</code> (or search for a long string starting with <code>eyJ</code>)\n"
+            "4. Copy the value and paste it here\n\n"
+            "<i>Type <b>skip</b> to link read-only (no lineup/waiver/trade actions).</i>",
+            chat_id,
+        )
+        return True
+
+    if state == "token":
+        token = None if text.strip().lower() == "skip" else text.strip()
         d = ONBOARD_DATA[chat_id]
         send_telegram("Connecting to Sleeper…", chat_id)
         try:
-            agent = FantasyAgent(d["username"], text, chat_id)
+            agent = FantasyAgent(d["username"], d["league_id"], chat_id, token)
             agent.init()
             fantasy_agents[chat_id] = agent
-            _save_user(chat_id, d["username"], text)
+            _save_user(chat_id, d["username"], d["league_id"], token)
             del ONBOARD_STATE[chat_id]
             del ONBOARD_DATA[chat_id]
+            mode = "✅ Full access — I can set lineups, claim waivers, and propose trades." if token else "👁 Read-only — I can view your team but won't make moves. Type /setup to add your token later."
             send_telegram(
-                "✅ All set! Your fantasy team is linked and I'm managing it autonomously.\n\n"
-                "You can now ask me anything about the NFL, or tell me to make a move:\n"
+                f"All set! Your fantasy team is linked.\n{mode}\n\n"
+                "Ask me anything about the NFL, or tell me to make a move:\n"
                 "<i>\"Start Lamar over Mahomes this week\"</i>\n"
-                "<i>\"Drop [Player] and pick up [Player]\"</i>\n"
-                "<i>\"What do you think about trading X for Y?\"</i>",
+                "<i>\"Drop [Player] and pick up [Player]\"</i>",
                 chat_id,
             )
         except Exception as e:
