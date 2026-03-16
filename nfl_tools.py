@@ -10,32 +10,39 @@ import polars as pl
 import nflreadpy as nfl
 import pytz
 
-HEADERS  = {"User-Agent": "NFLDailyBot/1.0 (Telegram digest bot)"}
-EASTERN  = pytz.timezone("America/New_York")
-BRAVE_KEY = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+HEADERS   = {"User-Agent": "NFLDailyBot/1.0 (Telegram digest bot)"}
+EASTERN   = pytz.timezone("America/New_York")
+TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 
 # ── Web Search ────────────────────────────────────────────────────────────────
 def web_search(query: str) -> dict:
-    if not BRAVE_KEY:
-        return {"error": "BRAVE_SEARCH_API_KEY not set", "results": []}
+    if not TAVILY_KEY:
+        return {"error": "TAVILY_API_KEY not set", "results": []}
     try:
-        resp = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            params={"q": query, "count": 6},
-            headers={
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip",
-                "X-Subscription-Token": BRAVE_KEY,
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key":        TAVILY_KEY,
+                "query":          query,
+                "search_depth":   "basic",
+                "max_results":    5,
+                "include_answer": True,   # concise LLM-ready direct answer
             },
-            timeout=10,
+            timeout=15,
         )
         resp.raise_for_status()
+        data    = resp.json()
         results = [
-            {"title": r.get("title", ""), "description": r.get("description", ""), "url": r.get("url", "")}
-            for r in resp.json().get("web", {}).get("results", [])
+            {"title": r.get("title", ""), "content": r.get("content", "")[:300], "url": r.get("url", "")}
+            for r in data.get("results", [])
         ]
-        return {"source": "Brave Search", "query": query, "results": results}
+        return {
+            "source":        "Tavily Search",
+            "query":         query,
+            "direct_answer": data.get("answer", ""),
+            "results":       results,
+        }
     except Exception as e:
         return {"error": str(e), "results": []}
 
@@ -491,7 +498,8 @@ NFL_TOOLS = [
         "description": (
             "Search the web for NFL/football information. Use for: pre-1999 history, "
             "Super Bowl records, rule questions, coaching history, draft history, "
-            "all-time records, or anything not covered by the structured tools."
+            "all-time records, or anything not covered by the structured tools. "
+            "Returns a direct answer plus supporting sources."
         ),
         "input_schema": {
             "type": "object",
