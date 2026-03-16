@@ -306,6 +306,27 @@ class FantasyAgent:
             "bench":    [self.player_info(p) for p in bench],
         }
 
+    def get_all_rosters(self) -> list[dict]:
+        """Return every team's roster with owner display name and full player list."""
+        users = self._get(f"/league/{self.league_id}/users") or []
+        uid_to_name = {str(u["user_id"]): u.get("display_name", u.get("username", "Unknown"))
+                       for u in users}
+        result = []
+        for r in self.get_rosters():
+            owner_id   = str(r.get("owner_id", ""))
+            owner_name = uid_to_name.get(owner_id, f"Team {r['roster_id']}")
+            is_me      = owner_id == self._user_id
+            players    = [self.player_info(pid) for pid in (r.get("players") or [])]
+            starters   = r.get("starters", [])
+            result.append({
+                "owner":    owner_name,
+                "is_me":    is_me,
+                "roster_id": r["roster_id"],
+                "starters": [self.player_info(p) for p in starters],
+                "bench":    [self.player_info(p) for p in players if p["id"] not in starters],
+            })
+        return result
+
     # ── Sleeper writes ────────────────────────────────────────────────────────
     def set_starters(self, starter_ids: list) -> bool:
         resp = requests.put(

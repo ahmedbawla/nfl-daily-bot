@@ -661,7 +661,6 @@ def run_agent(chat_id: str, user_text: str):
 
         try:
             avail = agent.available_players(limit=30)
-            # Group by position for readability
             by_pos: dict[str, list] = {}
             for p in avail:
                 by_pos.setdefault(p["position"], []).append(
@@ -674,6 +673,24 @@ def run_agent(chat_id: str, user_text: str):
             system += f"\n\nTop available free agents / waiver wire:\n{avail_lines}"
         except Exception as e:
             print(f"[Waiver context] {e}")
+
+        try:
+            all_rosters = agent.get_all_rosters()
+            lines = []
+            for team in all_rosters:
+                if team["is_me"]:
+                    continue
+                starters = ", ".join(
+                    f"{p['name']} ({p['position']})" for p in team["starters"]
+                )
+                bench = ", ".join(
+                    f"{p['name']} ({p['position']})" for p in team["bench"]
+                )
+                lines.append(f"{team['owner']} — Starters: {starters} | Bench: {bench}")
+            if lines:
+                system += "\n\nOther teams in the league:\n" + "\n".join(lines)
+        except Exception as e:
+            print(f"[League rosters context] {e}")
 
     conversation_history[chat_id].append({"role": "user", "content": user_text})
     messages = list(conversation_history[chat_id])
