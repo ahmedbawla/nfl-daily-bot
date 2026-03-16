@@ -3,18 +3,22 @@ NFL Daily Telegram Bot
 - /update or /nfl  → general NFL digest
 - /fantasy         → fantasy football focused digest
 - /draft           → NFL draft news and prospect updates
+- Any other text   → all-knowing NFL agent (Q&A, analysis, history)
 - Midnight ET      → auto daily digest
-Sources: ESPN Scoreboard · ESPN News · ESPN Injuries · Reddit r/nfl · Reddit r/fantasyfootball · Reddit r/nfldraft
+Sources: ESPN · Reddit · nflreadpy (NGS/PBP/stats 1999-present) · Brave Web Search
 """
 
 import os
 import sys
 import time
+import json
 import requests
 from anthropic import Anthropic
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
+from nfl_tools import NFL_TOOLS, TOOL_DISPATCH
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -23,6 +27,9 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 client  = Anthropic()
 HEADERS = {"User-Agent": "NFLDailyBot/1.0 (Telegram digest bot)"}
 EASTERN = pytz.timezone("America/New_York")
+
+# Conversation history per chat_id — enables follow-up questions
+conversation_history = defaultdict(list)
 
 
 # ── ESPN Scoreboard ───────────────────────────────────────────────────────────
@@ -362,11 +369,94 @@ def run_draft_digest():
     send_telegram(digest)
 
 
+# ── NFL Agent ────────────────────────────────────────────────────────────────
+AGENT_SYSTEM_PROMPT = """You are an all-knowing NFL football expert with access to real-time data tools.
+You can answer any question about the NFL — history, stats, rules, strategy, fantasy, betting, drafts, and more.
+
+Today's date: {today}
+
+ACCURACY RULES (critical):
+- ALWAYS call a tool before stating specific stats, scores, standings, or injury statuses.
+  Never recite numbers from memory alone — your training data may be months or years outdated.
+- For player stats, always call get_player_stats or compare_players first.
+- For current news/injuries/transactions, always call the relevant tool even if you think you know the answer.
+- If a tool returns no data, say so explicitly. Never fill gaps with guesses.
+- For pre-1999 history, Super Bowl records, rule history, or anything not in structured tools, use web_search.
+- Clearly attribute: "According to ESPN..." or "nflreadpy data shows..." when citing tool results.
+- If genuinely uncertain on a historical fact and no tool covers it, say so rather than confabulate.
+
+RESPONSE RULES:
+- Use Telegram HTML only: <b>bold</b> and <i>italic</i>. No markdown asterisks or underscores.
+- Max 600 words. For complex analysis use emoji section headers to keep it skimmable.
+- For follow-up questions, use context from the conversation history.
+- Be direct and insightful — write like a brilliant analyst, not a press release.
+- For advanced analysis (comparisons, efficiency, trends), go deep. The user wants real insight."""
+
+
+def _prune_history(chat_id: str, max_turns: int = 20):
+    """Keep at most max_turns messages. Always prune in pairs to avoid orphaned tool blocks."""
+    history = conversation_history[chat_id]
+    while len(history) > max_turns:
+        conversation_history[chat_id] = history[2:]
+        history = conversation_history[chat_id]
+
+
+def run_agent(chat_id: str, user_text: str):
+    today = datetime.now(EASTERN).strftime("%B %-d, %Y")
+    system = AGENT_SYSTEM_PROMPT.replace("{today}", today)
+
+    conversation_history[chat_id].append({"role": "user", "content": user_text})
+    messages = list(conversation_history[chat_id])
+
+    response = None
+    for _ in range(6):  # max 6 tool-call rounds
+        response = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=1500,
+            system=system,
+            tools=NFL_TOOLS,
+            messages=messages,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason != "tool_use":
+            break
+
+        # Dispatch all tool calls in this round
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                print(f"  [TOOL] {block.name}({json.dumps(block.input)})")
+                try:
+                    result = TOOL_DISPATCH[block.name](**block.input)
+                except Exception as e:
+                    result = {"error": str(e)}
+                print(f"  [TOOL] → {str(result)[:200]}")
+                tool_results.append({
+                    "type":        "tool_result",
+                    "tool_use_id": block.id,
+                    "content":     json.dumps(result),
+                })
+        messages.append({"role": "user", "content": tool_results})
+
+    # Extract final text
+    final = next(
+        (b.text for b in response.content if hasattr(b, "text") and b.text),
+        "Sorry, I couldn't generate a response."
+    )
+
+    # Save only the plain-text exchange back to persistent history
+    conversation_history[chat_id][-1] = {"role": "assistant", "content": final}
+    _prune_history(chat_id)
+
+    send_telegram(final)
+
+
 # ── Telegram polling ──────────────────────────────────────────────────────────
 def poll():
     """Long-poll Telegram for incoming commands."""
     offset = None
-    print("Polling for Telegram commands… (/update, /nfl, /fantasy, /draft)")
+    print("Polling… commands: /update /nfl /fantasy /draft  |  anything else → NFL agent")
 
     while True:
         try:
@@ -382,23 +472,24 @@ def poll():
             updates = resp.json().get("result", [])
 
             for update in updates:
-                offset  = update["update_id"] + 1
-                msg     = update.get("message", {})
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text    = msg.get("text", "").strip().lower().split()[0] if msg.get("text") else ""
+                offset      = update["update_id"] + 1
+                msg         = update.get("message", {})
+                chat_id     = str(msg.get("chat", {}).get("id", ""))
+                raw_text    = msg.get("text", "").strip()
+                cmd         = raw_text.lower().split()[0] if raw_text else ""
 
                 if chat_id != str(TELEGRAM_CHAT_ID):
                     continue
 
-                if text in ("/update", "/nfl"):
-                    print(f"[CMD] {text} — running NFL digest…")
+                if cmd in ("/update", "/nfl"):
+                    print(f"[CMD] {cmd} — running NFL digest…")
                     send_typing()
                     try:
                         run_digest()
                     except Exception as e:
                         send_telegram(f"<b>Error:</b> {e}")
 
-                elif text == "/fantasy":
+                elif cmd == "/fantasy":
                     print("[CMD] /fantasy — running fantasy digest…")
                     send_typing()
                     try:
@@ -406,11 +497,20 @@ def poll():
                     except Exception as e:
                         send_telegram(f"<b>Error:</b> {e}")
 
-                elif text == "/draft":
+                elif cmd == "/draft":
                     print("[CMD] /draft — running draft digest…")
                     send_typing()
                     try:
                         run_draft_digest()
+                    except Exception as e:
+                        send_telegram(f"<b>Error:</b> {e}")
+
+                elif raw_text and not cmd.startswith("/"):
+                    # Free-form question → all-knowing NFL agent
+                    print(f"[AGENT] '{raw_text[:80]}'")
+                    send_typing()
+                    try:
+                        run_agent(chat_id, raw_text)
                     except Exception as e:
                         send_telegram(f"<b>Error:</b> {e}")
 
