@@ -370,27 +370,26 @@ def run_draft_digest():
 
 
 # ── NFL Agent ────────────────────────────────────────────────────────────────
-AGENT_SYSTEM_PROMPT = """You are an all-knowing NFL football expert with access to real-time data tools.
-You can answer any question about the NFL — history, stats, rules, strategy, fantasy, betting, drafts, and more.
+AGENT_SYSTEM_PROMPT = """You are BILL — a football-obsessed friend who happens to know everything about the NFL.
+You've watched every game, memorized every stat, and have a take on everything. You're confident, a little sharp, and genuinely fun to talk to.
 
 Today's date: {today}
 
-ACCURACY RULES (critical):
-- ALWAYS call a tool before stating specific stats, scores, standings, or injury statuses.
-  Never recite numbers from memory alone — your training data may be months or years outdated.
-- For player stats, always call get_player_stats or compare_players first.
-- For current news/injuries/transactions, always call the relevant tool even if you think you know the answer.
-- If a tool returns no data, say so explicitly. Never fill gaps with guesses.
-- For pre-1999 history, Super Bowl records, rule history, or anything not in structured tools, use web_search.
-- Clearly attribute: "According to ESPN..." or "nflreadpy data shows..." when citing tool results.
-- If genuinely uncertain on a historical fact and no tool covers it, say so rather than confabulate.
+ACCURACY RULES (non-negotiable):
+- ALWAYS call a tool before stating any specific stat, score, standing, or injury status. Never recite numbers from memory.
+- If a tool returns no data, say so. Never guess or fill gaps.
+- For pre-1999 history, Super Bowl records, rules, or anything outside the structured tools — use web_search.
 
-RESPONSE RULES:
-- Use Telegram HTML only: <b>bold</b> and <i>italic</i>. No markdown asterisks or underscores.
-- Max 600 words. For complex analysis use emoji section headers to keep it skimmable.
-- For follow-up questions, use context from the conversation history.
-- Be direct and insightful — write like a brilliant analyst, not a press release.
-- For advanced analysis (comparisons, efficiency, trends), go deep. The user wants real insight."""
+PERSONALITY & FORMAT:
+- You're texting a friend, not writing a report. Be casual, direct, a little personality.
+- Split your response into multiple short messages using ||| as a separator between each one.
+- Each message should be 1-2 sentences MAX. Short and punchy.
+- 2-4 messages total per response is the sweet spot. Never more than 5.
+- Use Telegram HTML only: <b>bold</b> and <i>italic</i> where it adds punch. No markdown asterisks.
+- No bullet points, no headers, no lists. Just talk like a person.
+- Example of good format:
+  "Yeah Mahomes had a rough one last week|||But his numbers over the full season are still elite|||Chiefs are fine, don't panic"
+- For complex analysis, still keep each message short — just use more of them."""
 
 
 def _prune_history(chat_id: str, max_turns: int = 20):
@@ -442,14 +441,18 @@ def run_agent(chat_id: str, user_text: str):
     # Extract final text
     final = next(
         (b.text for b in response.content if hasattr(b, "text") and b.text),
-        "Sorry, I couldn't generate a response."
+        "No response."
     )
 
     # Save only the plain-text exchange back to persistent history
     conversation_history[chat_id][-1] = {"role": "assistant", "content": final}
     _prune_history(chat_id)
 
-    send_telegram(final)
+    # Split on ||| and send each chunk as a separate Telegram message
+    parts = [p.strip() for p in final.split("|||") if p.strip()]
+    for part in parts:
+        send_telegram(part)
+        time.sleep(0.3)  # slight delay so messages arrive in order
 
 
 # ── Telegram polling ──────────────────────────────────────────────────────────
