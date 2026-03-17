@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import json
+import html
 import requests
 from anthropic import Anthropic
 from datetime import datetime, timedelta, timezone
@@ -644,13 +645,13 @@ def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
         if ok:
             send_telegram(d.get("reply", "✅ Done."), chat_id)
         else:
-            err = getattr(agent, "_last_write_error", "no details")
-            send_telegram(f"❌ Sleeper rejected: <code>{err}</code>", chat_id)
+            err = html.escape(str(getattr(agent, "_last_write_error", "no details")))
+            send_telegram(f"❌ Sleeper rejected: {err}", chat_id)
         return True
 
     except Exception as e:
         print(f"[Fantasy command error] {e}")
-        send_telegram(f"❌ Couldn't execute that: <code>{e}</code>", chat_id)
+        send_telegram(f"❌ Couldn't execute that: {html.escape(str(e))}", chat_id)
         return True
 
 
