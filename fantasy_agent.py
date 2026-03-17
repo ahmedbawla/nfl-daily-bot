@@ -77,7 +77,7 @@ class FantasyAgent:
                 "Write operations need your Sleeper token. "
                 "Type /setup again and include your token when prompted."
             )
-        return {"Authorization": self._token, "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
 
     def _notify(self, text: str):
         send_message(self.chat_id, text)
@@ -332,6 +332,22 @@ class FantasyAgent:
         resp = requests.put(
             f"{SLEEPER_BASE}/league/{self.league_id}/rosters/{self._roster_id}/starters",
             headers=self._headers(), json={"starters": starter_ids}, timeout=10,
+        )
+        return resp.ok
+
+    def drop_player(self, drop_id: str) -> bool:
+        league  = self.get_league()
+        tx_type = "waiver" if league.get("settings", {}).get("waiver_type", 0) else "free_agent"
+        payload = {
+            "type": tx_type, "roster_id": self._roster_id,
+            "adds": {},
+            "drops": {drop_id: self._roster_id},
+            "settings": {},
+            "metadata": {},
+        }
+        resp = requests.post(
+            f"{SLEEPER_BASE}/league/{self.league_id}/transactions",
+            headers=self._headers(), json=payload, timeout=10,
         )
         return resp.ok
 

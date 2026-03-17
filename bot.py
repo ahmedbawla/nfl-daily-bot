@@ -563,7 +563,7 @@ MOVE_SYSTEM = """You are BILL managing a fantasy football roster on behalf of th
 The user has given you a direct instruction to make a roster move.
 Determine exactly what action to take and return ONLY valid JSON:
 {
-  "action": "set_lineup"|"waiver_claim"|"propose_trade"|"no_action",
+  "action": "set_lineup"|"waiver_claim"|"drop_player"|"propose_trade"|"no_action",
   "reasoning": "brief explanation",
   "starters": [...player_ids...],
   "add_player_id": "...",
@@ -571,14 +571,16 @@ Determine exactly what action to take and return ONLY valid JSON:
   "trade_give": [...player_ids...],
   "trade_get":  [...player_ids...],
   "trade_target_roster_id": 1,
-  "reply": "casual message back to user confirming what you did"
+  "reply": "casual 1-sentence confirmation of what you're doing"
 }
+Use player IDs from the roster/available data provided.
 If the instruction is unclear or you need more info, set action to no_action and explain in reply."""
 
 def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
     """
     If the user's message looks like a direct roster instruction, execute it.
-    Returns True if we handled it, False if it's just a question.
+    Returns True if we handled it (success or failure), False if it's just a question.
+    Once classified as a command we always return True so BILL doesn't also respond.
     """
     agent = fantasy_agents.get(chat_id)
     if not agent:
@@ -595,7 +597,7 @@ def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
     if "YES" not in classify.content[0].text.upper():
         return False
 
-    # It's a command — get roster context and execute
+    # It's a command — always return True from here so BILL never fake-executes it
     try:
         roster = agent.roster_summary()
         projs  = agent.get_projections(agent.get_current_week())
@@ -618,20 +620,32 @@ def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
         d   = json.loads(raw)
 
         action = d.get("action")
+        ok = False
         if action == "set_lineup" and d.get("starters"):
-            agent.set_starters(d["starters"])
+            ok = agent.set_starters(d["starters"])
+        elif action == "drop_player" and d.get("drop_player_id"):
+            ok = agent.drop_player(d["drop_player_id"])
         elif action == "waiver_claim" and d.get("add_player_id"):
-            agent.submit_waiver(d["add_player_id"], d.get("drop_player_id", ""))
+            ok = agent.submit_waiver(d["add_player_id"], d.get("drop_player_id", ""))
         elif action == "propose_trade" and d.get("trade_give") and d.get("trade_get"):
-            agent.propose_trade(d["trade_target_roster_id"], d["trade_give"], d["trade_get"])
+            ok = agent.propose_trade(d["trade_target_roster_id"], d["trade_give"], d["trade_get"])
+        elif action == "no_action":
+            send_telegram(d.get("reply", "Not sure what to do — can you clarify?"), chat_id)
+            return True
 
-        reply = d.get("reply", "Done.")
-        send_telegram(reply, chat_id)
+        if ok:
+            send_telegram(d.get("reply", "✅ Done."), chat_id)
+        else:
+            send_telegram(
+                f"❌ Sleeper rejected that move. Your token may be expired — try /reset then /setup with a fresh token.",
+                chat_id,
+            )
         return True
 
     except Exception as e:
         print(f"[Fantasy command error] {e}")
-        return False
+        send_telegram(f"❌ Couldn't execute that: {e}", chat_id)
+        return True  # Still return True — BILL shouldn't respond as if it did it
 
 
 def run_agent(chat_id: str, user_text: str):
