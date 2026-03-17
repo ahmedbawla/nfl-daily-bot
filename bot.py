@@ -563,7 +563,7 @@ MOVE_SYSTEM = """You are BILL managing a fantasy football roster on behalf of th
 The user has given you a direct instruction to make a roster move.
 Determine exactly what action to take and return ONLY valid JSON:
 {
-  "action": "set_lineup"|"waiver_claim"|"drop_player"|"propose_trade"|"no_action",
+  "action": "set_lineup"|"add_player"|"waiver_claim"|"drop_player"|"propose_trade"|"accept_trade"|"reject_trade"|"no_action",
   "reasoning": "brief explanation",
   "starters": [...player_ids...],
   "add_player_id": "...",
@@ -571,9 +571,11 @@ Determine exactly what action to take and return ONLY valid JSON:
   "trade_give": [...player_ids...],
   "trade_get":  [...player_ids...],
   "trade_target_roster_id": 1,
+  "transaction_id": "...",
   "reply": "casual 1-sentence confirmation of what you're doing"
 }
 Use player IDs from the roster/available data provided.
+For accept_trade/reject_trade use the transaction_id from the pending trade offer.
 If the instruction is unclear or you need more info, set action to no_action and explain in reply."""
 
 def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
@@ -625,10 +627,16 @@ def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
             ok = agent.set_starters(d["starters"])
         elif action == "drop_player" and d.get("drop_player_id"):
             ok = agent.drop_player(d["drop_player_id"])
+        elif action == "add_player" and d.get("add_player_id"):
+            ok = agent.add_player(d["add_player_id"])
         elif action == "waiver_claim" and d.get("add_player_id"):
             ok = agent.submit_waiver(d["add_player_id"], d.get("drop_player_id", ""))
         elif action == "propose_trade" and d.get("trade_give") and d.get("trade_get"):
             ok = agent.propose_trade(d["trade_target_roster_id"], d["trade_give"], d["trade_get"])
+        elif action == "accept_trade" and d.get("transaction_id"):
+            ok = agent.respond_trade(d["transaction_id"], True)
+        elif action == "reject_trade" and d.get("transaction_id"):
+            ok = agent.respond_trade(d["transaction_id"], False)
         elif action == "no_action":
             send_telegram(d.get("reply", "Not sure what to do — can you clarify?"), chat_id)
             return True
@@ -694,17 +702,48 @@ def run_agent(chat_id: str, user_text: str):
             for team in all_rosters:
                 if team["is_me"]:
                     continue
-                starters = ", ".join(
-                    f"{p['name']} ({p['position']})" for p in team["starters"]
-                )
-                bench = ", ".join(
-                    f"{p['name']} ({p['position']})" for p in team["bench"]
-                )
+                starters = ", ".join(f"{p['name']} ({p['position']})" for p in team["starters"])
+                bench    = ", ".join(f"{p['name']} ({p['position']})" for p in team["bench"])
                 lines.append(f"{team['owner']} — Starters: {starters} | Bench: {bench}")
             if lines:
                 system += "\n\nOther teams in the league:\n" + "\n".join(lines)
         except Exception as e:
             print(f"[League rosters context] {e}")
+
+        try:
+            standings = agent.get_standings()
+            s_lines = "  ".join(
+                f"{'★ ' if t['is_me'] else ''}{t['owner']} {t['wins']}-{t['losses']}"
+                for t in standings
+            )
+            system += f"\n\nLeague standings: {s_lines}"
+        except Exception as e:
+            print(f"[Standings context] {e}")
+
+        try:
+            matchup = agent.get_current_matchup()
+            if matchup:
+                opp_starters = ", ".join(
+                    f"{p['name']} ({p['position']})" for p in matchup["opp_starters"]
+                )
+                system += (
+                    f"\n\nWeek {matchup['week']} matchup: "
+                    f"You ({matchup['my_points']} pts) vs {matchup['opp_name']} ({matchup['opp_points']} pts). "
+                    f"Opponent's starters: {opp_starters}"
+                )
+        except Exception as e:
+            print(f"[Matchup context] {e}")
+
+        try:
+            pending = agent.get_pending_trades()
+            if pending:
+                t_lines = "; ".join(
+                    f"[id:{t['transaction_id']}] You give {t['you_give']}, you get {t['you_get']}"
+                    for t in pending
+                )
+                system += f"\n\nPending incoming trade offers: {t_lines}"
+        except Exception as e:
+            print(f"[Pending trades context] {e}")
 
     conversation_history[chat_id].append({"role": "user", "content": user_text})
     messages = list(conversation_history[chat_id])

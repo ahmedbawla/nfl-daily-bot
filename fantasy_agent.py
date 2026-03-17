@@ -306,6 +306,86 @@ class FantasyAgent:
             "bench":    [self.player_info(p) for p in bench],
         }
 
+    def get_standings(self) -> list[dict]:
+        """Returns league standings sorted by wins."""
+        users = self._get(f"/league/{self.league_id}/users") or []
+        uid_to_name = {str(u["user_id"]): u.get("display_name", u.get("username", "Unknown"))
+                       for u in users}
+        standings = []
+        for r in self.get_rosters():
+            s = r.get("settings", {})
+            standings.append({
+                "owner":    uid_to_name.get(str(r.get("owner_id", "")), f"Team {r['roster_id']}"),
+                "is_me":    str(r.get("owner_id", "")) == self._user_id,
+                "wins":     s.get("wins", 0),
+                "losses":   s.get("losses", 0),
+                "ties":     s.get("ties", 0),
+                "pts_for":  round(float(s.get("fpts", 0)) + float(s.get("fpts_decimal", 0)) / 100, 2),
+            })
+        return sorted(standings, key=lambda x: (-x["wins"], -x["pts_for"]))
+
+    def get_current_matchup(self) -> dict | None:
+        """Returns this user's current week matchup with opponent info."""
+        week = self.get_current_week()
+        matchups = self.get_matchups(week)
+        my_match = next((m for m in matchups if m.get("roster_id") == self._roster_id), None)
+        if not my_match:
+            return None
+        opp = next((m for m in matchups
+                    if m.get("matchup_id") == my_match.get("matchup_id")
+                    and m.get("roster_id") != self._roster_id), None)
+        users = self._get(f"/league/{self.league_id}/users") or []
+        uid_to_name = {str(u["user_id"]): u.get("display_name", "Unknown") for u in users}
+        rosters = self.get_rosters()
+        rid_to_uid = {r["roster_id"]: str(r.get("owner_id", "")) for r in rosters}
+
+        opp_name = "Unknown"
+        if opp:
+            opp_uid = rid_to_uid.get(opp["roster_id"], "")
+            opp_name = uid_to_name.get(opp_uid, f"Team {opp['roster_id']}")
+
+        return {
+            "week":        week,
+            "my_points":   float(my_match.get("points", 0)),
+            "opp_name":    opp_name,
+            "opp_points":  float(opp.get("points", 0)) if opp else 0,
+            "opp_starters": [self.player_info(p) for p in (opp.get("starters", []) if opp else [])],
+        }
+
+    def get_pending_trades(self) -> list[dict]:
+        """Returns incoming trade offers pending a response."""
+        week = self.get_current_week()
+        txns = self.get_transactions(week)
+        pending = []
+        for t in txns:
+            if t.get("type") != "trade" or t.get("status") != "pending":
+                continue
+            if self._roster_id not in (t.get("roster_ids") or []):
+                continue
+            adds = t.get("adds", {})
+            tid  = str(t.get("transaction_id") or t.get("id", ""))
+            give = [self.player_name(pid) for pid, rid in adds.items() if rid != self._roster_id]
+            get  = [self.player_name(pid) for pid, rid in adds.items() if rid == self._roster_id]
+            pending.append({"transaction_id": tid, "you_give": give, "you_get": get})
+        return pending
+
+    def add_player(self, add_id: str) -> bool:
+        """Add a free agent to an open roster spot (no drop needed)."""
+        league  = self.get_league()
+        tx_type = "waiver" if league.get("settings", {}).get("waiver_type", 0) else "free_agent"
+        payload = {
+            "type": tx_type, "roster_id": self._roster_id,
+            "adds": {add_id: self._roster_id},
+            "drops": {},
+            "settings": {},
+            "metadata": {},
+        }
+        resp = requests.post(
+            f"{SLEEPER_BASE}/league/{self.league_id}/transactions",
+            headers=self._headers(), json=payload, timeout=10,
+        )
+        return resp.ok
+
     def get_all_rosters(self) -> list[dict]:
         """Return every team's roster with owner display name and full player list."""
         users = self._get(f"/league/{self.league_id}/users") or []
