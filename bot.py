@@ -644,16 +644,14 @@ def handle_fantasy_command(chat_id: str, user_text: str) -> bool:
         if ok:
             send_telegram(d.get("reply", "✅ Done."), chat_id)
         else:
-            send_telegram(
-                f"❌ Sleeper rejected that move. Your token may be expired — try /reset then /setup with a fresh token.",
-                chat_id,
-            )
+            err = getattr(agent, "_last_write_error", "no details")
+            send_telegram(f"❌ Sleeper rejected: <code>{err}</code>", chat_id)
         return True
 
     except Exception as e:
         print(f"[Fantasy command error] {e}")
-        send_telegram(f"❌ Couldn't execute that: {e}", chat_id)
-        return True  # Still return True — BILL shouldn't respond as if it did it
+        send_telegram(f"❌ Couldn't execute that: <code>{e}</code>", chat_id)
+        return True
 
 
 def run_agent(chat_id: str, user_text: str):

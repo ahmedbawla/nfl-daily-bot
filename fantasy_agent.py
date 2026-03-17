@@ -408,64 +408,71 @@ class FantasyAgent:
         return result
 
     # ── Sleeper writes ────────────────────────────────────────────────────────
-    def set_starters(self, starter_ids: list) -> bool:
-        resp = requests.put(
-            f"{SLEEPER_BASE}/league/{self.league_id}/rosters/{self._roster_id}/starters",
-            headers=self._headers(), json={"starters": starter_ids}, timeout=10,
-        )
+    def _write(self, method: str, url: str, **kwargs) -> bool:
+        """Make an authenticated write request, log the result."""
+        fn = getattr(requests, method)
+        resp = fn(url, headers=self._headers(), timeout=10, **kwargs)
+        detail = f"{resp.status_code}"
+        try:
+            detail += f" {resp.json()}"
+        except Exception:
+            detail += f" {resp.text[:200]}"
+        print(f"[Sleeper write] {method.upper()} {url} → {detail}")
+        self._last_write_error = detail
         return resp.ok
 
     def drop_player(self, drop_id: str) -> bool:
         league  = self.get_league()
         tx_type = "waiver" if league.get("settings", {}).get("waiver_type", 0) else "free_agent"
-        payload = {
-            "type": tx_type, "roster_id": self._roster_id,
-            "adds": {},
-            "drops": {drop_id: self._roster_id},
-            "settings": {},
-            "metadata": {},
-        }
-        resp = requests.post(
+        return self._write("post",
             f"{SLEEPER_BASE}/league/{self.league_id}/transactions",
-            headers=self._headers(), json=payload, timeout=10,
+            json={"type": tx_type, "roster_id": self._roster_id,
+                  "adds": {}, "drops": {drop_id: self._roster_id},
+                  "settings": {}, "metadata": {}},
         )
-        return resp.ok
+
+    def add_player(self, add_id: str) -> bool:
+        league  = self.get_league()
+        tx_type = "waiver" if league.get("settings", {}).get("waiver_type", 0) else "free_agent"
+        return self._write("post",
+            f"{SLEEPER_BASE}/league/{self.league_id}/transactions",
+            json={"type": tx_type, "roster_id": self._roster_id,
+                  "adds": {add_id: self._roster_id}, "drops": {},
+                  "settings": {}, "metadata": {}},
+        )
 
     def submit_waiver(self, add_id: str, drop_id: str, bid: int = 0) -> bool:
         league  = self.get_league()
         tx_type = "waiver" if league.get("settings", {}).get("waiver_type", 0) else "free_agent"
-        payload = {
-            "type": tx_type, "roster_id": self._roster_id,
-            "adds": {add_id: self._roster_id},
-            "drops": {drop_id: self._roster_id} if drop_id else {},
-            "settings": {"waiver_bid": bid} if tx_type == "waiver" else {},
-            "metadata": {},
-        }
-        resp = requests.post(
+        return self._write("post",
             f"{SLEEPER_BASE}/league/{self.league_id}/transactions",
-            headers=self._headers(), json=payload, timeout=10,
+            json={"type": tx_type, "roster_id": self._roster_id,
+                  "adds": {add_id: self._roster_id},
+                  "drops": {drop_id: self._roster_id} if drop_id else {},
+                  "settings": {"waiver_bid": bid} if tx_type == "waiver" else {},
+                  "metadata": {}},
         )
-        return resp.ok
 
     def propose_trade(self, target_roster_id: int, give_ids: list, get_ids: list) -> bool:
         adds = {pid: self._roster_id       for pid in get_ids}
         adds.update({pid: target_roster_id for pid in give_ids})
-        resp = requests.post(
+        return self._write("post",
             f"{SLEEPER_BASE}/league/{self.league_id}/transactions",
-            headers=self._headers(),
-            json={"type":"trade","roster_ids":[self._roster_id,target_roster_id],
-                  "adds":adds,"drops":{},"settings":{},"metadata":{}},
-            timeout=10,
+            json={"type": "trade", "roster_ids": [self._roster_id, target_roster_id],
+                  "adds": adds, "drops": {}, "settings": {}, "metadata": {}},
         )
-        return resp.ok
 
     def respond_trade(self, transaction_id: str, accept: bool) -> bool:
         action = "accept" if accept else "reject"
-        resp = requests.post(
+        return self._write("post",
             f"{SLEEPER_BASE}/league/{self.league_id}/transactions/{transaction_id}/{action}",
-            headers=self._headers(), timeout=10,
         )
-        return resp.ok
+
+    def set_starters(self, starter_ids: list) -> bool:
+        return self._write("put",
+            f"{SLEEPER_BASE}/league/{self.league_id}/rosters/{self._roster_id}/starters",
+            json={"starters": starter_ids},
+        )
 
     # ── Claude decision engine ────────────────────────────────────────────────
     DECISION_SYSTEM = """You are an autonomous fantasy football manager making decisions for a Sleeper league team.
