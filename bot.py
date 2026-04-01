@@ -13,11 +13,16 @@ import sys
 import time
 import json
 import html
+import threading
 import requests
+import uvicorn
 from anthropic import Anthropic
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import pytz
 from nfl_tools import NFL_TOOLS, TOOL_DISPATCH
 from fantasy_agent import FantasyAgent, send_message, send_messages
@@ -789,11 +794,46 @@ def run_agent(chat_id: str, user_text: str):
     _prune_history(chat_id)
     _save_history(chat_id)
 
-    # Split on ||| and send each chunk as a separate Telegram message
+    # Return parts split on |||
     parts = [p.strip() for p in final.split("|||") if p.strip()]
-    for part in parts:
-        send_telegram(part, chat_id)
-        time.sleep(0.3)
+    return parts
+
+
+# ── Web API (FastAPI) ─────────────────────────────────────────────────────────
+web_app = FastAPI()
+web_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["POST", "GET"],
+    allow_headers=["*"],
+)
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str
+
+
+@web_app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@web_app.post("/chat")
+def web_chat(req: ChatRequest):
+    # Prefix web sessions so they don't collide with Telegram chat IDs
+    session_key = f"web_{req.session_id}"
+    try:
+        parts = run_agent(session_key, req.message)
+        return {"messages": parts}
+    except Exception as e:
+        print(f"[WebAPI] error for session {req.session_id}: {e}")
+        return {"messages": [f"Sorry, something went wrong — {str(e)[:120]}"]}
+
+
+def _start_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="warning")
 
 
 # ── Telegram polling ──────────────────────────────────────────────────────────
@@ -906,8 +946,13 @@ def poll():
                         print(f"[Fantasy command error] {e}")
 
                     # Step 3: general NFL Q&A with BILL
-                    try:    run_agent(chat_id, raw_text)
-                    except Exception as e: send_telegram(f"<b>Error:</b> {e}", chat_id)
+                    try:
+                        parts = run_agent(chat_id, raw_text)
+                        for part in parts:
+                            send_telegram(part, chat_id)
+                            time.sleep(0.3)
+                    except Exception as e:
+                        send_telegram(f"<b>Error:</b> {e}", chat_id)
 
         except Exception as e:
             print(f"[WARN] Poll error: {e} — retrying in 5s")
@@ -927,6 +972,11 @@ def _run_all_agents(method: str):
 if __name__ == "__main__":
     # Restore previously onboarded users
     _load_users()
+
+    # Start web API in background thread
+    web_thread = threading.Thread(target=_start_web_server, daemon=True)
+    web_thread.start()
+    print(f"[Web] API server starting on port {os.environ.get('PORT', 8080)}")
 
     scheduler = BackgroundScheduler(timezone=EASTERN)
 
